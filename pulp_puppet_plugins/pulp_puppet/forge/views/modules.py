@@ -1,4 +1,3 @@
-import base64
 import re
 import urllib
 
@@ -6,14 +5,15 @@ from django.http import HttpResponseNotFound, HttpResponse, HttpResponseBadReque
 
 from pulp.server.webservices.views.util import generate_json_response
 
-from pulp_puppet.forge.views.abstract import AbstractForgeView
 from pulp_puppet.forge import releases
+from pulp_puppet.forge.views.abstract import AbstractForgeView
 
+from distutils.version import StrictVersion
 
 MODULE_PATTERN = re.compile('(^[a-zA-Z0-9]+)(/|-)([a-zA-Z0-9_]+)$')
 
 
-class ReleasesView(AbstractForgeView):
+class ModulesView(AbstractForgeView):
 
     REPO_RESOURCE = 'repository'
     CONSUMER_RESOURCE = 'consumer'
@@ -44,7 +44,7 @@ class ReleasesView(AbstractForgeView):
             if not credentials:
                 return HttpResponse('Unauthorized', status=401)
 
-        module_name = self._get_module_name(request.GET)
+        module_name = self._get_module_name(request.path)
         if not module_name:
             return HttpResponseBadRequest('Module name is missing.')
         version = request.GET.get('version')
@@ -53,21 +53,31 @@ class ReleasesView(AbstractForgeView):
                                  hostname=hostname)
         if isinstance(data, HttpResponse):
             return data
-        return self.format_results(data, request.GET, request.path_info)
+
+        return self.format_results(data, request.GET, request.path_info, module_name)
 
     @staticmethod
-    def _get_module_name(get_dict):
+    def _get_module_name(path):
         """
         :return: name of the module being requested, or None if not found or invalid
         """
-        module_name = get_dict.get('module', '')
+        splitpaths = path.split('/')
+        module_name = splitpaths[3]
         match = MODULE_PATTERN.match(module_name)
         if match:
             normalized_name = u'%s/%s' % (match.group(1), match.group(3))
             return normalized_name
 
+    @staticmethod
+    def _get_module_author(module_name):
+        """
+        :return: author of the module being requested, or None if not found or invalid
+        """
+        splitpaths = module_name.split('/')
+        return splitpaths[0]
 
-class ReleasesPost36View(ReleasesView):
+
+class ModulesPost36View(ModulesView):
 
     @staticmethod
     def _format_query_string(base_url, module_name, module_version, offset, limit):
@@ -104,7 +114,7 @@ class ReleasesPost36View(ReleasesView):
         """
         return releases.view(*args, recurse_deps=False, view_all_matching=True, **kwargs)
 
-    def format_results(self, data, get_dict, path):
+    def format_results(self, data, get_dict, path, module_name):
         """
         Format the results and begin streaming out to the caller for the v3 API
 
@@ -113,64 +123,84 @@ class ReleasesPost36View(ReleasesView):
         :param get_dict: The GET parameters
         :type get_dict: dict
         :param path: The path starting with parameters
-        :type get_dict: dict
+        :type path: str
+        :param module_name: The module name with author
+        :type module_name: unicode
         :return: the body of what should be streamed out to the caller
         :rtype: str
         """
-        limit = int(get_dict.get('limit', 20))
-        current_offset = int(get_dict.get('offset', 0))
-        module_name = get_dict.get('module', '')
-        module_version = get_dict.get('version', None)
-
-        first_path = self._format_query_string(path, module_name, module_version,
-                                               0, limit)
-        current_path = self._format_query_string(path, module_name, module_version,
-                                                 current_offset, limit)
-        if current_offset > 0:
-            previous_path = self._format_query_string(path, module_name, module_version,
-                                                      current_offset - limit, limit)
-        else:
-            previous_path = None
+        # module_name = get_dict.get('module', '')
+        # clean_name = self._get_module_name(module_name)
+        clean_name = module_name.split('/')[1]
+        clean_author = self._get_module_author(module_name)
+        module_slug = clean_author + '-' + clean_name
 
         formatted_results = {
-            'pagination': {
-                'limit': limit,
-                'offset': current_offset,
-                'first': first_path,
-                'previous': previous_path,
-                'current': current_path,
-                'next': None,
-                'total': 1
+            'uri': '/v3/modules/' + module_slug,
+            'slug': module_slug,
+            'name': clean_name,
+            'created_at': '2015-09-11 07:22:37 -0700',
+            'updated_at': '2016-01-06 12:58:15 -0800',
+            # 'supported': false,
+            'endorsement': None,
+            'module_group': 'base',
+            'current_release': {
+                'module': {
+                    'uri': '/v3/modules/' + module_slug,
+                    'slug': module_slug,
+                    'name': clean_name,
+                    'owner': {
+                        'slug': clean_author,
+                        'username': clean_author
+                    }
+                },
             },
-            'results': []
-        }
-        module_list = data.get(self._get_module_name(get_dict))
-        total_count = len(module_list)
+            'releases': []
 
-        for module in module_list[current_offset: (current_offset + limit)]:
+        }
+
+        module_list = data.get(module_name)
+
+        versions = []
+        module_data = {}
+        for module in module_list:
             formatted_dependencies = []
             for dep in module.get('dependencies', []):
                 formatted_dependencies.append({
                     'name': dep[0],
                     'version_requirement': dep[1]
                 })
-            module_data = {
+
+            versions.append(module.get('version'))
+            module_data[module.get('version')] = {
                 'metadata': {
-                    'name': module_name,
+                    'name': module_slug,
                     'version': module.get('version'),
                     'dependencies': formatted_dependencies
                 },
                 'file_uri': module.get('file'),
-                'file_md5': module.get('file_md5')
+                'file_md5': module.get('file_md5'),
+                'version': module.get('version'),
+                'slug': module_slug + '-' + module.get('version')
             }
 
-            formatted_results['results'].append(module_data)
+        versions.sort(key=StrictVersion)
+        current_version = versions.pop()
 
-        formatted_results['pagination']['total'] = total_count
+        for attribute, value in module_data[current_version].iteritems():
+            formatted_results['current_release'][attribute] = value
 
-        if total_count > (current_offset + limit):
-            next_path = self._format_query_string(path, module_name, module_version,
-                                                  current_offset + limit, limit)
-            formatted_results['pagination']['next'] = next_path
+        release_data = []
+        for version, module in module_data.iteritems():
+            release_data.append({
+                'uri': '/v3/releases/' + str(module['slug']),
+                'slug':  module['slug'],
+                'version': version,
+                'supported': False,
+                'created_at': None,
+                'deleted_at': None
+            })
+
+        formatted_results['releases'] = release_data
 
         return generate_json_response(formatted_results)

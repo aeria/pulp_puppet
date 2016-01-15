@@ -1,5 +1,7 @@
 from django.conf.urls import patterns, url
 from pulp_puppet.forge.views.releases import ReleasesView, ReleasesPost36View
+from pulp_puppet.forge.views.modules import ModulesView, ModulesPost36View
+from pulp_puppet.forge.views.files import FilesView, FilesPost36View
 from pulp.server.db import connection
 
 
@@ -9,5 +11,7 @@ urlpatterns = patterns('',
     url(r'^pulp_puppet/forge/([^/]+)/([^/]+)/api/v1/releases.json', ReleasesView.as_view(),
         name='post_33_releases'),
     url(r'^api/v1/releases.json', ReleasesView.as_view(), name='pre_33_releases'),
-    url(r'^v3/releases', ReleasesPost36View.as_view(), name='post_36_releases')
+    url(r'^v3/releases', ReleasesPost36View.as_view(), name='post_36_releases'),
+    url(r'^v3/modules', ModulesPost36View.as_view(), name='post_36_modules'),
+    url(r'^v3/files', FilesPost36View.as_view(), name='post_36_files')
 )
